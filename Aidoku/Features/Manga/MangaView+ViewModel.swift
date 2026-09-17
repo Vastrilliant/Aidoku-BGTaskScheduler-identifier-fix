@@ -23,6 +23,7 @@ extension MangaView {
         @Published var downloadStatus: [String: DownloadStatus] = [:] // chapterId: status
 
         @Published var bookmarked = false
+        @Published var hasCategories = false
 
         @Published var nextChapter: AidokuRunner.Chapter?
         @Published var readingInProgress = false
@@ -79,6 +80,16 @@ extension MangaView.ViewModel {
     }
 
     private func registerLibraryNotifications() {
+        NotificationCenter.default.publisher(for: .updateLibrary)
+            .sink { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    await self.loadBookmarked()
+                    await self.checkForCategories()
+                }
+            }
+            .store(in: &cancellables)
+
         NotificationCenter.default.publisher(for: .updateMangaDetails)
             .sink { [weak self] output in
                 Task { @MainActor in
@@ -103,9 +114,9 @@ extension MangaView.ViewModel {
                     Task { @MainActor in
                         guard
                             let self,
-                            let manga = output.object as? AidokuRunner.Manga,
-                            manga.identifier == self.manga.identifier
-                                else {
+                            let id = output.object as? MangaIdentifier,
+                            id == self.manga.identifier
+                        else {
                             return
                         }
                         await self.loadBookmarked()
@@ -131,6 +142,14 @@ extension MangaView.ViewModel {
                 }
             }
             .store(in: &cancellables)
+
+            NotificationCenter.default.publisher(for: .updateCategories)
+                .sink { [weak self] _ in
+                    Task {
+                        await self?.checkForCategories()
+                    }
+                }
+                .store(in: &cancellables)
     }
 
     private func registerSourceNotifications() {
@@ -158,6 +177,7 @@ extension MangaView.ViewModel {
                 guard let self else { return }
                 Task { @MainActor in
                     await self.loadHistory()
+                    self.chapters = self.filteredChapters()
                     self.updateReadButton()
                 }
             }
@@ -310,6 +330,12 @@ extension MangaView.ViewModel {
 }
 
 extension MangaView.ViewModel {
+    func checkForCategories() async {
+        hasCategories = await CoreDataManager.shared.container.performBackgroundTask { context in
+            !CoreDataManager.shared.getCategoryTitles(sorted: false, context: context).isEmpty
+        }
+    }
+
     func refreshReadButtonState() {
         updateReadButton()
     }
@@ -585,7 +611,7 @@ extension MangaView.ViewModel {
     }
 
     private func loadDownloadStatus() async {
-        for chapter in chapters + otherDownloadedChapters {
+        for chapter in (manga.chapters ?? chapters) + otherDownloadedChapters {
             downloadStatus[chapter.key] = DownloadManager.shared.getDownloadStatus(
                 for: .init(sourceKey: manga.sourceKey, mangaKey: manga.key, chapterKey: chapter.key)
             )
@@ -841,7 +867,10 @@ extension MangaView.ViewModel {
         let nextChapter = getNextChapter()
         switch nextChapter {
             case .none:
-                return
+                self.nextChapter = nil
+                readingInProgress = false
+                allChaptersRead = false
+                allChaptersLocked = false
             case .allRead:
                 allChaptersRead = true
                 allChaptersLocked = false
@@ -889,5 +918,6 @@ extension MangaView.ViewModel {
         manga.langFilter = chapterLangFilter
         manga.scanlatorFilter = chapterScanlatorFilter
         await CoreDataManager.shared.updateMangaDetails(manga: manga)
+        NotificationCenter.default.post(name: .filteredChapters, object: manga.identifier)
     }
 }
